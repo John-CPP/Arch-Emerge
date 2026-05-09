@@ -85,6 +85,43 @@ pub fn run_command<P: AsRef<Path>>(cmd: &str, args: &[&str], cwd: Option<P>) -> 
     }
 }
 
+/// Like [`run_command`], but captures stdout and stderr instead of inheriting them.
+/// Use this when you want to suppress output in non-verbose mode.
+pub fn run_command_quiet<P: AsRef<Path>>(cmd: &str, args: &[&str], cwd: Option<P>) -> Result<(), String> {
+    if crate::is_dry_run_mode() {
+        let rendered_cmd = if args.is_empty() {
+            cmd.to_string()
+        } else {
+            format!("{} {}", cmd, args.join(" "))
+        };
+        println!("[DRY RUN] {}", rendered_cmd);
+        return Ok(());
+    }
+
+    let mut command = Command::new(cmd);
+    command.args(args);
+
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+
+    let output = command
+        .output()
+        .map_err(|e| format!("Failed to execute '{}': {}", cmd, e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format_command_error(
+            cmd,
+            args,
+            &output.stdout,
+            &output.stderr,
+            output.status.code(),
+        ))
+    }
+}
+
 /// Run a multi-line shell snippet in `cwd`, streaming combined output to the terminal
 /// (`tee`) while saving a copy for callers that need to parse logs (e.g. missing PGP keys).
 pub fn run_shell_in_dir_with_tee<P: AsRef<Path>>(cwd: P, shell_body: &str) -> Result<(), String> {
@@ -171,7 +208,7 @@ pub fn remove_src_pkg_workdirs(repo_dir: &Path) -> Result<(), String> {
 
 /// Remove prior `*.pkg.tar.zst` for this package base name from PKGDEST so old builds (e.g.
 /// `-1.2`) are not offered alongside the new one (`-1.3`) after a recompile.
-pub fn remove_stale_pkgs_in_pkgdest(pkgdest: &str, base_name: &str, verbose: bool) {
+pub fn remove_stale_pkgs_in_pkgdest(pkgdest: &str, base_name: &str) {
     if crate::is_dry_run_mode() {
         println!(
             "[DRY RUN] rm stale {}-*.pkg.tar.zst in {}",
@@ -201,7 +238,7 @@ pub fn remove_stale_pkgs_in_pkgdest(pkgdest: &str, base_name: &str, verbose: boo
                 None::<&str>,
             );
         } else {
-            crate::vlog!(verbose, "Removed stale package file: {}", name);
+            crate::vlog!("Removed stale package file: {}", name);
         }
     }
 }

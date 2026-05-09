@@ -6,7 +6,7 @@ use crate::utils::{
     pacman_query_version, read_pkg_full_version_from_dir, remove_src_pkg_workdirs,
     remove_stale_pkgs_in_pkgdest, run_command, run_shell_in_dir_with_tee, vercmp,
 };
-use crate::{blog, die, ewarn};
+use crate::{blog, die, ewarn, vlog};
 use colored::Colorize;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -89,7 +89,7 @@ fn ensure_devtools_chroot(chrootdir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn run_build_with_key_retry(build_cmd: &str, repo_dir: &Path, verbose: bool) -> Result<(), String> {
+fn run_build_with_key_retry(build_cmd: &str, repo_dir: &Path) -> Result<(), String> {
     let key_re = Regex::new(r"(?i)unknown public key ([0-9A-F]+)")
         .map_err(|e| format!("Failed to compile missing-key regex: {}", e))?;
     // Large logs (e.g. Firefox) can mention "unknown public key" long before the real failure in
@@ -117,7 +117,7 @@ fn run_build_with_key_retry(build_cmd: &str, repo_dir: &Path, verbose: bool) -> 
                 }
 
                 for key in newly_found {
-                    crate::vlog!(verbose, "Importing missing key: {}", key);
+                    crate::vlog!("Importing missing key: {}", key);
                     if let Err(gpg_err) = run_command(
                         "gpg",
                         &[
@@ -134,7 +134,7 @@ fn run_build_with_key_retry(build_cmd: &str, repo_dir: &Path, verbose: bool) -> 
                         ));
                     }
                 }
-                crate::vlog!(verbose, "Retrying build after importing keys...");
+                crate::vlog!("Retrying build after importing keys...");
             }
         }
     }
@@ -209,16 +209,14 @@ fn manual_src_newer_than_installed(pkg: &str, cli: &Cli, config: &Config) -> Res
     Ok(vercmp(&src_ver, &inst_ver)? > 0)
 }
 
-/// `-U` manual list: `helpers_match` is a line in `checkupdates`/`yay -Qu`. For `arch` that is
-/// enough. For other repos, `-R` runs `git pull` then compares PKGBUILD / `.SRCINFO` version to `pacman -Q`.
 /// `git pull` (or clone) for each distinct remote: **arch** uses one clone per package
 /// (`arch:<base_pkg>`); **other repositories** run at most once per `repo_name` no matter how many
 /// `manual_update_packages` share it. [`crate::git::prepare_repo`] also skips a second `git pull`
 /// on the same clone path in one process. Does not compile; callers run report / builds / update.
 pub fn sync_manual_repo_remotes(config: &Config, cli: &Cli) {
-    blog!("Syncing git remotes for manual_update_packages...");
+    vlog!("Syncing git remotes for manual_update_packages...");
     if config.manual_update_packages.is_empty() {
-        blog!("manual_update_packages is empty; nothing to sync.");
+        vlog!("manual_update_packages is empty; nothing to sync.");
         return;
     }
     let mut seen = HashSet::new();
@@ -242,7 +240,7 @@ pub fn sync_manual_repo_remotes(config: &Config, cli: &Cli) {
             true,
             None,
         );
-        blog!("Synced {} (repo {})", pkg, repo_name);
+        vlog!("Synced {} (repo {})", pkg, repo_name);
     }
 }
 
@@ -287,14 +285,6 @@ fn classify_manual_pkg_version(
 
 fn print_manual_version_line(pkg: &str, line: ManualPkgVersionLine) {
     if crate::is_silent_mode() {
-        match &line {
-            ManualPkgVersionLine::UpToDate { current } => {
-                println!("==> {}: Up-to-date (current version: {})", pkg, current);
-            }
-            ManualPkgVersionLine::Upgrade { current, new } => {
-                println!("==> {}: Has an upgrade ({} vs {})", pkg, current, new);
-            }
-        }
         return;
     }
 
@@ -314,7 +304,7 @@ fn print_manual_version_line(pkg: &str, line: ManualPkgVersionLine) {
 
 /// After `sync_manual_repo_remotes`, compare each manual package's PKGBUILD to `pacman -Q`.
 pub fn report_manual_update_versions(config: &Config, cli: &Cli) {
-    blog!("PKGBUILD vs installed (manual_update_packages):");
+    vlog!("PKGBUILD vs installed (manual_update_packages):");
     let mut pkgbuild_cache = PkgbuildDirCache::new();
     for pkg in &config.manual_update_packages {
         match classify_manual_pkg_version(pkg, cli, config, &mut pkgbuild_cache) {
@@ -330,29 +320,24 @@ pub fn should_run_manual_prebuild(
     pkg: &str,
     cli: &Cli,
     config: &Config,
-    helpers_match: bool,
 ) -> bool {
     if cli.force_build {
         return true;
-    }
-    let (repo_name, _, _) = resolve_pkg_repo(pkg, cli, config);
-    if repo_name == "arch" {
-        return helpers_match;
     }
     if cli.force_repo_update {
         match manual_src_newer_than_installed(pkg, cli, config) {
             Ok(v) => v,
             Err(e) => {
                 ewarn!(
-                    "{}: could not compare PKGBUILD to installed ({}); using helper list only",
+                    "{}: could not compare PKGBUILD to installed ({}); skipping",
                     pkg,
                     e
                 );
-                helpers_match
+                false
             }
         }
     } else {
-        helpers_match
+        false
     }
 }
 
@@ -382,7 +367,6 @@ pub fn install_package_phase(pkg: &str, cli: &Cli, config: &Config) {
         base_pkg.as_str(),
         Some(repo_dir),
         config,
-        cli.verbose,
     );
 
     if let Some(pc) = pkg_config
@@ -406,7 +390,7 @@ pub fn process_package(pkg: &str, cli: &Cli, config: &Config, defer_install: boo
 
     if cli.install_only {
         blog!("Install-only mode, searching for existing artifacts...");
-        crate::install::install_from_ready_dir(pkg, base_pkg_name, config, cli.verbose);
+        crate::install::install_from_ready_dir(pkg, base_pkg_name, config);
         return true;
     }
 
@@ -468,16 +452,15 @@ pub fn process_package(pkg: &str, cli: &Cli, config: &Config, defer_install: boo
     }
 
     // Match Bash `prepare_sums_pkgrel`: `prepare_pkgsums` (updpkgsums only if -u), then always `bump_pkgrel`.
-    if cli.update_sums && !update_pkgsums(repo_dir, cli.verbose) {
+    if cli.update_sums && !update_pkgsums(repo_dir) {
         ewarn!("updpkgsums failed, continuing...");
     }
-    bump_pkgrel(repo_dir, cli.verbose);
+    bump_pkgrel(repo_dir);
 
     // Drop older PKGDEST artifacts for this base name so install prompts do not list stale builds.
     remove_stale_pkgs_in_pkgdest(
         &config.paths.ready_made_packages_path,
         base_pkg_name,
-        cli.verbose,
     );
 
     let mut build_env = config.build.default_environment.clone();
@@ -504,7 +487,7 @@ pub fn process_package(pkg: &str, cli: &Cli, config: &Config, defer_install: boo
 
     if let Some(cmd) = custom_cmd {
         blog!("Executing custom build command...");
-        if let Err(e) = run_build_with_key_retry(&cmd, repo_dir, cli.verbose) {
+        if let Err(e) = run_build_with_key_retry(&cmd, repo_dir) {
             if config.build.ignore_compilation_failures {
                 ewarn!("Custom build command failed for {}: {}", pkg, e);
                 restore_pkgbuild(repo_dir);
@@ -536,7 +519,7 @@ pub fn process_package(pkg: &str, cli: &Cli, config: &Config, defer_install: boo
                 build_cmd.push_str(" --nocheck");
             }
 
-            if let Err(e) = run_build_with_key_retry(&build_cmd, repo_dir, cli.verbose) {
+            if let Err(e) = run_build_with_key_retry(&build_cmd, repo_dir) {
                 if config.build.ignore_compilation_failures {
                     ewarn!("makepkg failed for {}: {}", pkg, e);
                     restore_pkgbuild(repo_dir);
@@ -565,7 +548,7 @@ pub fn process_package(pkg: &str, cli: &Cli, config: &Config, defer_install: boo
             if skip_tests {
                 build_cmd.push_str(" -- --nocheck");
             }
-            if let Err(e) = run_build_with_key_retry(&build_cmd, repo_dir, cli.verbose) {
+            if let Err(e) = run_build_with_key_retry(&build_cmd, repo_dir) {
                 if config.build.ignore_compilation_failures {
                     ewarn!("makechrootpkg failed for {}: {}", pkg, e);
                     restore_pkgbuild(repo_dir);
@@ -578,7 +561,7 @@ pub fn process_package(pkg: &str, cli: &Cli, config: &Config, defer_install: boo
 
     // Bash: install then post-update (both only if not `-o` and not deferred). Hooks still see the bumped PKGBUILD.
     if !cli.compile_only && !install_deferred_this_run {
-        crate::install::install_artifacts(pkg, base_pkg_name, Some(repo_dir), config, cli.verbose);
+        crate::install::install_artifacts(pkg, base_pkg_name, Some(repo_dir), config);
 
         if let Some(pc) = pkg_config
             && let Some(cmd) = &pc.post_update_command

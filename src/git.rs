@@ -1,5 +1,5 @@
-use crate::utils::{check_sudo_removal, run_command};
-use crate::{blog, die, ewarn};
+use crate::utils::{check_sudo_removal, run_command, run_command_quiet};
+use crate::{die, ewarn, vlog};
 use colored::Colorize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -112,12 +112,19 @@ pub fn prepare_repo(
     force_update: bool,
     pkgbuild_cache: Option<&mut PkgbuildDirCache>,
 ) -> PathBuf {
+    let git_run = |c: &str, a: &[&str], d: Option<&Path>| {
+        if crate::is_verbose_mode() {
+            run_command(c, a, d)
+        } else {
+            run_command_quiet(c, a, d)
+        }
+    };
     if repo_name == "arch" {
         let repo_dir = PathBuf::from(packages_path)
             .join("arch")
             .join(base_pkg_name);
         if clean && repo_dir.exists() {
-            blog!("Cleaning old repository directory for {}", base_pkg_name);
+            vlog!("Cleaning old repository directory for {}", base_pkg_name);
             if let Err(e) = check_sudo_removal(&repo_dir) {
                 die!("Failed to clean repository directory: {}", e);
             }
@@ -125,11 +132,11 @@ pub fn prepare_repo(
 
         if !repo_dir.exists() {
             let clone_url = format!("{}/{}.git", repo_url.trim_end_matches('/'), base_pkg_name);
-            blog!("Cloning arch package repo {}...", base_pkg_name);
-            if let Err(e) = run_command(
+            vlog!("Cloning arch package repo {}...", base_pkg_name);
+            if let Err(e) = git_run(
                 "git",
                 &["clone", &clone_url, repo_dir.to_string_lossy().as_ref()],
-                None::<&str>,
+                None,
             ) {
                 die!("Failed to clone repository {}: {}", clone_url, e);
             }
@@ -138,8 +145,8 @@ pub fn prepare_repo(
             && repo_dir.join(".git").exists()
             && !shared_repo_remote_already_updated(&repo_dir)
         {
-            blog!("Updating arch package repo {}...", base_pkg_name);
-            match run_command("git", &["pull", "--ff-only"], Some(&repo_dir)) {
+            vlog!("Updating arch package repo {}...", base_pkg_name);
+            match git_run("git", &["pull", "--ff-only"], Some(repo_dir.as_path())) {
                 Ok(()) => shared_repo_remote_note_updated(&repo_dir),
                 Err(e) => {
                     ewarn!("git pull failed for {}: {}", base_pkg_name, e);
@@ -151,25 +158,25 @@ pub fn prepare_repo(
 
     let repo_dir = PathBuf::from(packages_path).join(repo_name);
     if clean && repo_dir.exists() {
-        blog!("Cleaning old repository directory for {}", repo_name);
+        vlog!("Cleaning old repository directory for {}", repo_name);
         if let Err(e) = check_sudo_removal(&repo_dir) {
             die!("Failed to clean repository directory: {}", e);
         }
     }
 
     if !repo_dir.join(".git").exists() {
-        blog!("Cloning repository '{}'...", repo_name);
-        if let Err(e) = run_command(
+        vlog!("Cloning repository '{}'...", repo_name);
+        if let Err(e) = git_run(
             "git",
             &["clone", repo_url, repo_dir.to_string_lossy().as_ref()],
-            None::<&str>,
+            None,
         ) {
             die!("Failed to clone repository {}: {}", repo_url, e);
         }
         shared_repo_remote_note_updated(&repo_dir);
     } else if force_update && !shared_repo_remote_already_updated(&repo_dir) {
         loop {
-            if run_command("git", &["pull", "--ff-only"], Some(&repo_dir)).is_ok() {
+            if git_run("git", &["pull", "--ff-only"], Some(repo_dir.as_path())).is_ok() {
                 shared_repo_remote_note_updated(&repo_dir);
                 break;
             }

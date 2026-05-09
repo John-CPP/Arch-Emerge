@@ -1,8 +1,7 @@
 # ABS
 
-Arch Linux / CachyOS package builder written in Rust. Clones sources, builds with `makepkg` or `makechrootpkg`, installs built `.pkg.tar.zst` artifacts, and optionally drives a full system update (`-U`) while compiling selected packages first.
-
-**Repository:** <https://github.com/John-CPP/ABS.git>
+Arch Linux / CachyOS package builder. Maybe works with other arch-based distros.
+Main idea of ABS is add gentoo-emerge like functionality to arch-like systems.
 
 ---
 

@@ -13,18 +13,39 @@ use colored::Colorize;
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use utils::{check_sudo_removal, prime_sudo_for_session, run_command, spawn_sudo_keepalive};
 
-static SILENT_MODE: AtomicBool = AtomicBool::new(false);
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Verbosity {
+    Silent = 0,
+    Normal = 1,
+    Verbose = 2,
+}
+
+static VERBOSITY: AtomicU8 = AtomicU8::new(Verbosity::Normal as u8);
 static DRY_RUN_MODE: AtomicBool = AtomicBool::new(false);
 
-pub fn set_silent_mode(value: bool) {
-    SILENT_MODE.store(value, Ordering::Relaxed);
+pub fn set_verbosity(v: Verbosity) {
+    VERBOSITY.store(v as u8, Ordering::Relaxed);
+}
+
+pub fn verbosity() -> Verbosity {
+    match VERBOSITY.load(Ordering::Relaxed) {
+        0 => Verbosity::Silent,
+        1 => Verbosity::Normal,
+        2 => Verbosity::Verbose,
+        _ => Verbosity::Normal,
+    }
 }
 
 pub fn is_silent_mode() -> bool {
-    SILENT_MODE.load(Ordering::Relaxed)
+    verbosity() == Verbosity::Silent
+}
+
+pub fn is_verbose_mode() -> bool {
+    verbosity() == Verbosity::Verbose
 }
 
 pub fn set_dry_run_mode(value: bool) {
@@ -138,7 +159,7 @@ macro_rules! ewarn {
 #[macro_export]
 macro_rules! blog {
     ($($arg:tt)*) => {
-        if !$crate::is_silent_mode() {
+        if $crate::verbosity() >= $crate::Verbosity::Normal {
             println!("{} {}", "==>".blue(), format!($($arg)*));
         }
     };
@@ -146,8 +167,8 @@ macro_rules! blog {
 
 #[macro_export]
 macro_rules! vlog {
-    ($verbose:expr, $($arg:tt)*) => {
-        if $verbose {
+    ($($arg:tt)*) => {
+        if $crate::verbosity() >= $crate::Verbosity::Verbose {
             println!("==> {}", format!($($arg)*));
         }
     };
@@ -155,7 +176,14 @@ macro_rules! vlog {
 
 fn main() {
     let cli = Cli::parse();
-    set_silent_mode(cli.silent);
+
+    let v = match (cli.verbose, cli.silent) {
+        (true, true) => Verbosity::Normal,
+        (true, false) => Verbosity::Verbose,
+        (false, true) => Verbosity::Silent,
+        (false, false) => Verbosity::Normal,
+    };
+    set_verbosity(v);
     set_dry_run_mode(cli.dry_run);
 
     let config = config::Config::load_config();
@@ -198,13 +226,16 @@ fn main() {
     }
 
     // `-R` without `-U`: sync all manual repos, report PKGBUILD vs installed, then `command` (not refresh).
-    if cli.force_repo_update && !cli.system_update && cli.packages.is_empty() {
-        blog!("Repository refresh (manual_update_packages) and system update...");
-        build::sync_manual_repo_remotes(&config, &cli);
-        build::report_manual_update_versions(&config, &cli);
-        system::run_system_update(&config, false, cli.verbose);
-        return;
-    }
+        if cli.force_repo_update && !cli.system_update && cli.packages.is_empty() {
+            blog!("Repository refresh (manual_update_packages) and system update...");
+            build::sync_manual_repo_remotes(&config, &cli);
+            if !is_silent_mode() {
+                println!();
+            }
+            build::report_manual_update_versions(&config, &cli);
+            system::run_system_update(&config, false);
+            return;
+        }
 
     let defer_install_pass = config.build.compile_first_install_after
         && !cli.compile_only
@@ -214,22 +245,14 @@ fn main() {
     if cli.system_update {
         blog!("Starting system update mode...");
 
-        let updates = system::check_updates();
-        if !updates.is_empty() {
-            println!("Updates available:\n{}", updates);
-        }
-
         if cli.force_repo_update {
             blog!("Refreshing git remotes for manual_update_packages (-R)...");
             build::sync_manual_repo_remotes(&config, &cli);
+            if !is_silent_mode() {
+                println!();
+            }
             build::report_manual_update_versions(&config, &cli);
         }
-
-        let helper_line_matches = |pkg: &str| {
-            updates
-                .lines()
-                .any(|line| line.starts_with(&format!("{} ", pkg)))
-        };
 
         let mut skipped_install_after_compile_fail = HashSet::<String>::new();
 
@@ -238,8 +261,8 @@ fn main() {
                 continue;
             }
 
-            if build::should_run_manual_prebuild(pkg, &cli, &config, helper_line_matches(pkg)) {
-                blog!("Manual update package: {}", pkg);
+            if build::should_run_manual_prebuild(pkg, &cli, &config) {
+                vlog!("Manual update package: {}", pkg);
                 if !build::process_package(pkg, &cli, &config, defer_install_pass) {
                     skipped_install_after_compile_fail.insert(pkg.clone());
                 }
@@ -247,7 +270,7 @@ fn main() {
         }
 
         if defer_install_pass {
-            blog!("Install phase (compile-first: all scheduled builds finished)...");
+            vlog!("Install phase (compile-first: all scheduled builds finished)...");
             for pkg in &config.manual_update_packages {
                 if cli.packages.contains(pkg) {
                     continue;
@@ -255,14 +278,14 @@ fn main() {
                 if skipped_install_after_compile_fail.contains(pkg) {
                     continue;
                 }
-                if build::should_run_manual_prebuild(pkg, &cli, &config, helper_line_matches(pkg)) {
+                if build::should_run_manual_prebuild(pkg, &cli, &config) {
                     build::install_package_phase(pkg, &cli, &config);
                 }
             }
         }
 
         let use_refresh = cli.force_repo_update;
-        system::run_system_update(&config, use_refresh, cli.verbose);
+        system::run_system_update(&config, use_refresh);
     } else {
         if cli.packages.is_empty() {
             die!("No packages specified.");
@@ -278,7 +301,7 @@ fn main() {
         }
 
         if defer_install_pass {
-            blog!("Install phase (compile-first: all scheduled builds finished)...");
+            vlog!("Install phase (compile-first: all scheduled builds finished)...");
             for pkg in &cli.packages {
                 if skipped_install_after_compile_fail.contains(pkg) {
                     continue;

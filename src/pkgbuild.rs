@@ -50,12 +50,12 @@ fn replace_all_pkgrel_lines(content: &str, next: &str) -> String {
 /// - If the process was **stopped before restore** (Ctrl+Z, kill, crash), live `PKGBUILD` still
 ///   carries the last bumped `pkgrel` while the backup still holds upstream. We detect
 ///   `live != backup` and **chain** one more step from live (`1.2` → `1.3` → …).
-pub fn bump_pkgrel(repo_dir: &Path, verbose: bool) {
+pub fn bump_pkgrel(repo_dir: &Path) {
     let pkgbuild_path = repo_dir.join("PKGBUILD");
     let backup_path = repo_dir.join(".PKGBUILD.emerge_backup");
 
     if !pkgbuild_path.exists() {
-        vlog!(verbose, "PKGBUILD not found, skipping pkgrel bump");
+        vlog!("PKGBUILD not found, skipping pkgrel bump");
         return;
     }
 
@@ -65,7 +65,6 @@ pub fn bump_pkgrel(repo_dir: &Path, verbose: bool) {
         fs::read_to_string(&backup_path).unwrap_or_default()
     } else {
         vlog!(
-            verbose,
             "No PKGBUILD backup found; using live PKGBUILD as bump baseline"
         );
         String::new()
@@ -81,7 +80,7 @@ pub fn bump_pkgrel(repo_dir: &Path, verbose: bool) {
         }
         out.push_str("pkgrel=1.2\n");
         if let Err(e) = fs::write(&pkgbuild_path, out) {
-            vlog!(verbose, "Failed to append pkgrel: {}", e);
+            vlog!("Failed to append pkgrel: {}", e);
         }
         return;
     }
@@ -96,7 +95,6 @@ pub fn bump_pkgrel(repo_dir: &Path, verbose: bool) {
     let bump_from = match (&live_pkgrel, &backup_pkgrel) {
         (Some(live), Some(bak)) if live != bak => {
             vlog!(
-                verbose,
                 "PKGBUILD still bumped vs backup (no restore yet); chaining pkgrel from {}",
                 live
             );
@@ -114,7 +112,7 @@ pub fn bump_pkgrel(repo_dir: &Path, verbose: bool) {
         }
         out.push_str("pkgrel=1.2\n");
         if let Err(e) = fs::write(&pkgbuild_path, out) {
-            vlog!(verbose, "Failed to append pkgrel: {}", e);
+            vlog!("Failed to append pkgrel: {}", e);
         }
         return;
     }
@@ -123,7 +121,7 @@ pub fn bump_pkgrel(repo_dir: &Path, verbose: bool) {
     let replaced = replace_all_pkgrel_lines(&live_text, &next);
 
     if let Err(e) = fs::write(&pkgbuild_path, replaced) {
-        vlog!(verbose, "Failed to bump pkgrel: {}", e);
+        vlog!("Failed to bump pkgrel: {}", e);
     }
 }
 
@@ -156,10 +154,10 @@ pub fn restore_pkgbuild(repo_dir: &Path) {
     }
 }
 
-pub fn update_pkgsums(repo_dir: &Path, verbose: bool) -> bool {
-    vlog!(verbose, "==> Updating checksums (updpkgsums)...");
+pub fn update_pkgsums(repo_dir: &Path) -> bool {
+    vlog!("==> Updating checksums (updpkgsums)...");
     if let Err(e) = crate::utils::run_command("updpkgsums", &[], Some(repo_dir)) {
-        vlog!(verbose, "Failed to run updpkgsums: {}", e);
+        vlog!("Failed to run updpkgsums: {}", e);
         false
     } else {
         true

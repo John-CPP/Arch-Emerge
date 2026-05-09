@@ -236,7 +236,6 @@ fn dependency_names_from_file(pkg_file: &Path) -> Vec<String> {
 fn auto_include_local_dependencies(
     selected: &mut Vec<PathBuf>,
     available: &[PathBuf],
-    verbose: bool,
 ) {
     let mut file_by_pkg: HashMap<String, PathBuf> = HashMap::new();
     for file in available {
@@ -262,7 +261,6 @@ fn auto_include_local_dependencies(
                 }
                 if let Some(dep_file) = file_by_pkg.get(&dep_name) {
                     vlog!(
-                        verbose,
                         "Auto-including dependency from built set: {}",
                         dep_name
                     );
@@ -283,7 +281,6 @@ pub fn install_artifacts(
     base_pkg_name: &str,
     repo_dir: Option<&Path>,
     config: &Config,
-    verbose: bool,
 ) {
     let mut files = collect_candidate_files(
         pkg_input,
@@ -292,7 +289,7 @@ pub fn install_artifacts(
         &config.paths.ready_made_packages_path,
     );
     if files.is_empty() {
-        vlog!(verbose, "No installable artifacts found for {}", pkg_input);
+        vlog!("No installable artifacts found for {}", pkg_input);
         return;
     }
 
@@ -301,7 +298,7 @@ pub fn install_artifacts(
         if let Some(name) = pkg_name
             && config.skip_install_packages.contains(&name)
         {
-            vlog!(verbose, "Skipping ignored package artifact: {}", name);
+            vlog!("Skipping ignored package artifact: {}", name);
             return false;
         }
         true
@@ -316,7 +313,7 @@ pub fn install_artifacts(
         return;
     }
     let mut selected = selected;
-    auto_include_local_dependencies(&mut selected, &files, verbose);
+    auto_include_local_dependencies(&mut selected, &files);
     selected.sort();
     selected.dedup();
 
@@ -338,7 +335,6 @@ pub fn install_from_ready_dir(
     pkg_input: &str,
     base_pkg_name: &str,
     config: &Config,
-    verbose: bool,
 ) {
-    install_artifacts(pkg_input, base_pkg_name, None, config, verbose);
+    install_artifacts(pkg_input, base_pkg_name, None, config);
 }
