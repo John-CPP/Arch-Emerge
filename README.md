@@ -1,4 +1,4 @@
-# Arch-Emerge (Alpha version. Currently very buggy. New version in progress, soon.)
+# Arch-Emerge
 
 <div align="center">
 
@@ -72,6 +72,10 @@ $EDITOR ~/.config/arch-emerge/emerge.toml   # set real paths under your $HOME or
 
 See [`emerge.toml.example`](emerge.toml.example) for all keys: repositories, `manual_update_packages`, per-package `[packages.NAME]` sections, custom build commands, hooks, etc.
 
+### Sudo
+
+**`--list`** only prints configuration and exits; it does **not** run **`sudo`**. For any other invocation (builds, **`-U`**, etc.), except **`--dry-run`**, the program runs **`sudo -v` once at startup** so your password is cached before later steps such as **`sudo rm -rf …/pkg`**. A background refresh runs **`sudo -v` about every three minutes** until the process exits, which helps the default sudo timestamp window (often 15 minutes) stay valid during long compiles. If **`sudo -v`** fails at startup, later commands may prompt again. For a longer gap without a password, configure **`sudoers`** (e.g. **`Defaults timestamp_timeout`**).
+
 ---
 
 ## See it working (minimal smoke test)
@@ -131,12 +135,31 @@ Full **local build** (longer; compiles dependencies as `makepkg` would):
 | `-e` / `-s` / `-r` / `-k` | Full clean / sudo clean / remove chroot / install keyrings |
 | `-u` | `updpkgsums` before build |
 | `-v` / `-i` | Verbose / silent |
-| `-R` | Force refresh custom git repos |
-| `-U` | System update flow |
+| `-R` | Refresh **all** git remotes used by **`manual_update_packages`**, print a colored **PKGBUILD vs installed** report, then run **`[system_update].command_to_update_repositories`** with ignores — **no** compile |
+| `-U` | Print pending updates, maybe pre-build manuals, then run **`command_to_update_repositories`** with ignores |
+| `-RU` | Same as **`-R`** plus **compile** manuals that qualify, then run **`command_to_perform_system_update`** with ignores |
 | `--repo` | Override repository for this run |
 | `--install-only` | Install existing packages from `ready_made_packages_path` |
+| `--clean-install` | Before **`makepkg`**, remove **`src/`** and **`pkg/`** under the package directory (e.g. `…/ventureoo/firefox-pure/`). Enables clean install for this run even if **`clean_install_by_default`** is false in config |
 | `--dry-run` | Print without executing |
 | `--list` | Dump resolved config |
+
+**`manual_update_packages`** drives repo refreshes and optional pre-builds. Every run of **`command_to_update_repositories`** or **`command_to_perform_system_update`** appends **`ignore_flag`** for each name in **`ignore_packages`** and **`manual_update_packages`** (deduped). Legacy TOML keys **`command`** and **`command_with_refresh`** are still accepted as aliases.
+
+With **`-v`**, the exact shell line for the system update (e.g. `yay -Sy … --ignore …`) is printed before it runs; without **`-v`** that line is omitted.
+
+### `[build]` options (TOML)
+
+| Key | Meaning |
+| --- | --- |
+| `default_environment` | `local` or `chroot` |
+| `ignore_compilation_failures` | If true, a failed **`makepkg`** / custom build logs a warning and the run continues with the next package (aliases: **`IGNORE_COMPILATION_FAILURES`**) |
+| `compile_first_install_after` | If true, build every scheduled package first, then run install prompts / **`pacman -U`** for all of them (good for unattended compile). Not used with **`--install-only`**, **`--download-only`**, or **`--compile-only`** (aliases: **`COMPILE_FIRST_INSTALL_AFTER`**) |
+| `clean_install_by_default` | If true, remove **`src/`** and **`pkg/`** before each compile (same as **`--clean-install`**). **`--clean-install`** turns this on for one run even when the config is false |
+
+Pre-build rules for **`-U`** / **`-RU`**: **`arch`** uses **`checkupdates`/`yay -Qu`** line prefix matching (or **`-n`**). **Non-`arch`** with **`-RU`** compares the PKGBUILD tree version (**.SRCINFO** / **`PKGBUILD`**, with **`makepkg --printsrcinfo`** as fallback) to **`pacman -Q`** after the git refresh; with **`-U`** only (no **`-R`**), non-`arch` manuals still follow the helper list only. Use **`-n`** to force a manual rebuild.
+
+Per-package **`pre_update_command`** runs after clone/pull and before **`makepkg`** (e.g. **`rm -rf mozbuild`** for some Firefox PKGBUILDs). **`--clean-install`** / **`clean_install_by_default`** remove **`src/`** and **`pkg/`** after the **`PKGBUILD`** backup and before **`pre_update_command`**.
 
 ---
 

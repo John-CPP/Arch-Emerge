@@ -42,33 +42,12 @@ fn resolve_packagelist_line(
     p.exists().then_some(p)
 }
 
-fn collect_candidate_files(
+/// Artifacts already in **`PKGDEST`** for this package (no `makepkg` subprocess).
+fn collect_candidate_files_from_pkgdest(
     pkg_input: &str,
     base_pkg_name: &str,
-    repo_dir: Option<&Path>,
     ready_packages_path: &str,
 ) -> Vec<PathBuf> {
-    if let Some(dir) = repo_dir
-        && let Ok(output) = run_command_with_output_env(
-            "makepkg",
-            &["--packagelist"],
-            Some(dir),
-            &[("PKGDEST", ready_packages_path)],
-        )
-    {
-        let mut files = Vec::new();
-        for line in output.lines() {
-            if let Some(p) = resolve_packagelist_line(line, dir, ready_packages_path) {
-                files.push(p);
-            }
-        }
-        files.sort();
-        files.dedup();
-        if !files.is_empty() {
-            return files;
-        }
-    }
-
     let mut files = Vec::new();
     if let Ok(entries) = fs::read_dir(ready_packages_path) {
         for entry in entries.flatten() {
@@ -91,7 +70,44 @@ fn collect_candidate_files(
         }
     }
     files.sort();
+    files.dedup();
     files
+}
+
+fn collect_candidate_files(
+    pkg_input: &str,
+    base_pkg_name: &str,
+    repo_dir: Option<&Path>,
+    ready_packages_path: &str,
+) -> Vec<PathBuf> {
+    let from_dest =
+        collect_candidate_files_from_pkgdest(pkg_input, base_pkg_name, ready_packages_path);
+    if !from_dest.is_empty() {
+        return from_dest;
+    }
+
+    if let Some(dir) = repo_dir
+        && let Ok(output) = run_command_with_output_env(
+            "makepkg",
+            &["--packagelist"],
+            Some(dir),
+            &[("PKGDEST", ready_packages_path)],
+        )
+    {
+        let mut files = Vec::new();
+        for line in output.lines() {
+            if let Some(p) = resolve_packagelist_line(line, dir, ready_packages_path) {
+                files.push(p);
+            }
+        }
+        files.sort();
+        files.dedup();
+        if !files.is_empty() {
+            return files;
+        }
+    }
+
+    collect_candidate_files_from_pkgdest(pkg_input, base_pkg_name, ready_packages_path)
 }
 
 fn prompt_for_selection(files: &[PathBuf]) -> Option<Vec<PathBuf>> {

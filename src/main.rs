@@ -10,10 +10,11 @@ mod utils;
 use clap::Parser;
 use cli::Cli;
 use colored::Colorize;
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use utils::{check_sudo_removal, run_command};
+use utils::{check_sudo_removal, prime_sudo_for_session, run_command, spawn_sudo_keepalive};
 
 static SILENT_MODE: AtomicBool = AtomicBool::new(false);
 static DRY_RUN_MODE: AtomicBool = AtomicBool::new(false);
@@ -164,6 +165,16 @@ fn main() {
         return;
     }
 
+    if !cli.dry_run {
+        if let Err(e) = prime_sudo_for_session() {
+            ewarn!(
+                "sudo -v failed (later sudo steps may ask for a password again): {}",
+                e
+            );
+        }
+        spawn_sudo_keepalive();
+    }
+
     if cli.system_update && cli.install_only {
         die!("--install-only cannot be used with -U");
     }
@@ -180,10 +191,25 @@ fn main() {
 
     if cli.packages.is_empty()
         && !cli.system_update
+        && !cli.force_repo_update
         && (cli.install_keys || cli.remove_chroot || cli.clean_all)
     {
         return;
     }
+
+    // `-R` without `-U`: sync all manual repos, report PKGBUILD vs installed, then `command` (not refresh).
+    if cli.force_repo_update && !cli.system_update && cli.packages.is_empty() {
+        blog!("Repository refresh (manual_update_packages) and system update...");
+        build::sync_manual_repo_remotes(&config, &cli);
+        build::report_manual_update_versions(&config, &cli);
+        system::run_system_update(&config, false, cli.verbose);
+        return;
+    }
+
+    let defer_install_pass = config.build.compile_first_install_after
+        && !cli.compile_only
+        && !cli.install_only
+        && !cli.download_only;
 
     if cli.system_update {
         blog!("Starting system update mode...");
@@ -192,38 +218,78 @@ fn main() {
         if !updates.is_empty() {
             println!("Updates available:\n{}", updates);
         }
-        let mut manually_compiled_packages: Vec<String> = Vec::new();
 
-        // We should also check manual updates
+        if cli.force_repo_update {
+            blog!("Refreshing git remotes for manual_update_packages (-R)...");
+            build::sync_manual_repo_remotes(&config, &cli);
+            build::report_manual_update_versions(&config, &cli);
+        }
+
+        let helper_line_matches = |pkg: &str| {
+            updates
+                .lines()
+                .any(|line| line.starts_with(&format!("{} ", pkg)))
+        };
+
+        let mut skipped_install_after_compile_fail = HashSet::<String>::new();
+
         for pkg in &config.manual_update_packages {
-            if !cli.packages.contains(pkg) {
-                // Check if this package is actually in the updates list
-                let needs_update = updates
-                    .lines()
-                    .any(|line| line.starts_with(&format!("{} ", pkg)));
+            if cli.packages.contains(pkg) {
+                continue;
+            }
 
-                if needs_update || cli.force_build {
-                    blog!("Checking custom repository updates for {}", pkg);
-                    build::process_package(pkg, &cli, &config);
-                    manually_compiled_packages.push(pkg.clone());
-                } else {
-                    blog!(
-                        "No system updates pending for custom package '{}'. Skipping...",
-                        pkg
-                    );
+            if build::should_run_manual_prebuild(pkg, &cli, &config, helper_line_matches(pkg)) {
+                blog!("Manual update package: {}", pkg);
+                if !build::process_package(pkg, &cli, &config, defer_install_pass) {
+                    skipped_install_after_compile_fail.insert(pkg.clone());
+                }
+            } else {
+                blog!(
+                    "No build scheduled for manual package '{}'. Skipping compile...",
+                    pkg
+                );
+            }
+        }
+
+        if defer_install_pass {
+            blog!("Install phase (compile-first: all scheduled builds finished)...");
+            for pkg in &config.manual_update_packages {
+                if cli.packages.contains(pkg) {
+                    continue;
+                }
+                if skipped_install_after_compile_fail.contains(pkg) {
+                    continue;
+                }
+                if build::should_run_manual_prebuild(pkg, &cli, &config, helper_line_matches(pkg)) {
+                    build::install_package_phase(pkg, &cli, &config);
                 }
             }
         }
 
-        system::run_system_update(&config, cli.force_repo_update, &manually_compiled_packages);
+        let use_refresh = cli.force_repo_update;
+        system::run_system_update(&config, use_refresh, cli.verbose);
     } else {
         if cli.packages.is_empty() {
             die!("No packages specified.");
         }
 
+        let mut skipped_install_after_compile_fail = HashSet::<String>::new();
+
         for pkg in &cli.packages {
             blog!("Processing package: {}", pkg);
-            build::process_package(pkg, &cli, &config);
+            if !build::process_package(pkg, &cli, &config, defer_install_pass) {
+                skipped_install_after_compile_fail.insert(pkg.clone());
+            }
+        }
+
+        if defer_install_pass {
+            blog!("Install phase (compile-first: all scheduled builds finished)...");
+            for pkg in &cli.packages {
+                if skipped_install_after_compile_fail.contains(pkg) {
+                    continue;
+                }
+                build::install_package_phase(pkg, &cli, &config);
+            }
         }
     }
 }

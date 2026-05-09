@@ -1,8 +1,11 @@
 use crate::cli::Cli;
 use crate::config::Config;
-use crate::git::prepare_repo;
+use crate::git::{prepare_repo, PkgbuildDirCache};
 use crate::pkgbuild::{backup_pkgbuild, bump_pkgrel, restore_pkgbuild, update_pkgsums};
-use crate::utils::{remove_stale_pkgs_in_pkgdest, run_command, run_shell_in_dir_with_tee};
+use crate::utils::{
+    pacman_query_version, read_pkg_full_version_from_dir, remove_src_pkg_workdirs,
+    remove_stale_pkgs_in_pkgdest, run_command, run_shell_in_dir_with_tee, vercmp,
+};
 use crate::{blog, die, ewarn};
 use colored::Colorize;
 use regex::Regex;
@@ -36,12 +39,19 @@ impl<'a> Drop for PkgbuildGuard<'a> {
 fn run_build_with_key_retry(build_cmd: &str, repo_dir: &Path, verbose: bool) -> Result<(), String> {
     let key_re = Regex::new(r"(?i)unknown public key ([0-9A-F]+)")
         .map_err(|e| format!("Failed to compile missing-key regex: {}", e))?;
+    // Large logs (e.g. Firefox) can mention "unknown public key" long before the real failure in
+    // `prepare()` / `build()` / `check()`. Retrying the whole makepkg then re-runs those phases for no benefit.
+    let pkgbuild_phase_failed_re = Regex::new(r"(?i)A failure occurred in (prepare|build|check)\(\)")
+        .map_err(|e| format!("Failed to compile phase-failure regex: {}", e))?;
     let mut seen_keys: HashSet<String> = HashSet::new();
 
     loop {
         match run_shell_in_dir_with_tee(repo_dir, build_cmd) {
             Ok(()) => return Ok(()),
             Err(err) => {
+                if pkgbuild_phase_failed_re.is_match(&err) {
+                    return Err(err);
+                }
                 let mut newly_found = Vec::new();
                 for caps in key_re.captures_iter(&err) {
                     let key = caps[1].to_uppercase();
@@ -77,10 +87,9 @@ fn run_build_with_key_retry(build_cmd: &str, repo_dir: &Path, verbose: bool) -> 
     }
 }
 
-pub fn process_package(pkg: &str, cli: &Cli, config: &Config) -> bool {
+fn resolve_pkg_repo(pkg: &str, cli: &Cli, config: &Config) -> (String, String, String) {
     let pkg_config = config.packages.get(pkg);
 
-    // Determine the source repository
     let mut repo_name = config
         .repositories
         .get("default")
@@ -116,19 +125,236 @@ pub fn process_package(pkg: &str, cli: &Cli, config: &Config) -> bool {
             })
         }
     };
-    let repo_url = repo_url_string.as_str();
 
-    let base_pkg_name = if let Some(pc) = pkg_config {
-        pc.alias.as_deref().unwrap_or(pkg)
-    } else {
-        pkg
+    let base_pkg = pkg_config
+        .and_then(|pc| pc.alias.as_deref())
+        .unwrap_or(pkg)
+        .to_string();
+
+    (repo_name, repo_url_string, base_pkg)
+}
+
+/// After `git pull` on a shared repo (`-R`), decide if PKGBUILD versions are newer than installed.
+fn manual_src_newer_than_installed(pkg: &str, cli: &Cli, config: &Config) -> Result<bool, String> {
+    let (repo_name, repo_url_string, base_pkg) = resolve_pkg_repo(pkg, cli, config);
+    let repo_url = repo_url_string.as_str();
+    let pkg_dir = prepare_repo(
+        pkg,
+        &base_pkg,
+        &repo_name,
+        repo_url,
+        &config.paths.packages_path,
+        false,
+        cli.force_repo_update,
+        None,
+    );
+    let src_ver = read_pkg_full_version_from_dir(pkg_dir.as_path())?;
+    let Some(inst_ver) = pacman_query_version(&base_pkg)? else {
+        return Ok(true);
     };
+    Ok(vercmp(&src_ver, &inst_ver)? > 0)
+}
+
+/// `-U` manual list: `helpers_match` is a line in `checkupdates`/`yay -Qu`. For `arch` that is
+/// enough. For other repos, `-R` runs `git pull` then compares PKGBUILD / `.SRCINFO` version to `pacman -Q`.
+/// `git pull` (or clone) for every `manual_update_packages` entry (arch: per package; others:
+/// deduped per repo key). Does not compile; callers run report / system update / builds.
+pub fn sync_manual_repo_remotes(config: &Config, cli: &Cli) {
+    blog!("Syncing git remotes for manual_update_packages...");
+    if config.manual_update_packages.is_empty() {
+        blog!("manual_update_packages is empty; nothing to sync.");
+        return;
+    }
+    let mut seen = HashSet::new();
+    for pkg in &config.manual_update_packages {
+        let (repo_name, repo_url_string, base_pkg) = resolve_pkg_repo(pkg, cli, config);
+        let key = if repo_name == "arch" {
+            format!("arch:{base_pkg}")
+        } else {
+            repo_name.clone()
+        };
+        if !seen.insert(key) {
+            continue;
+        }
+        let _ = prepare_repo(
+            pkg,
+            &base_pkg,
+            &repo_name,
+            repo_url_string.as_str(),
+            &config.paths.packages_path,
+            false,
+            true,
+            None,
+        );
+        blog!("Synced {} (repo {})", pkg, repo_name);
+    }
+}
+
+enum ManualPkgVersionLine {
+    UpToDate { current: String },
+    Upgrade { current: String, new: String },
+}
+
+fn classify_manual_pkg_version(
+    pkg: &str,
+    cli: &Cli,
+    config: &Config,
+    pkgbuild_cache: &mut PkgbuildDirCache,
+) -> Result<ManualPkgVersionLine, String> {
+    let (repo_name, repo_url_string, base_pkg) = resolve_pkg_repo(pkg, cli, config);
+    let pkg_dir = prepare_repo(
+        pkg,
+        &base_pkg,
+        &repo_name,
+        repo_url_string.as_str(),
+        &config.paths.packages_path,
+        false,
+        false,
+        Some(pkgbuild_cache),
+    );
+    let src = read_pkg_full_version_from_dir(pkg_dir.as_path())?;
+    let inst = pacman_query_version(&base_pkg)?;
+    let Some(inst) = inst else {
+        return Ok(ManualPkgVersionLine::Upgrade {
+            current: "not installed".to_string(),
+            new: src,
+        });
+    };
+    match vercmp(&src, &inst)? {
+        x if x > 0 => Ok(ManualPkgVersionLine::Upgrade {
+            current: inst,
+            new: src,
+        }),
+        _ => Ok(ManualPkgVersionLine::UpToDate { current: inst }),
+    }
+}
+
+fn print_manual_version_line(pkg: &str, line: ManualPkgVersionLine) {
+    if crate::is_silent_mode() {
+        match &line {
+            ManualPkgVersionLine::UpToDate { current } => {
+                println!("==> {}: Up-to-date (current version: {})", pkg, current);
+            }
+            ManualPkgVersionLine::Upgrade { current, new } => {
+                println!("==> {}: Has an upgrade ({} vs {})", pkg, current, new);
+            }
+        }
+        return;
+    }
+
+    print!("{} ", "==>".blue());
+    print!("{}: ", pkg);
+    match line {
+        ManualPkgVersionLine::UpToDate { current } => {
+            print!("{}", "Up-to-date".green().bold());
+            println!(" (current version: {})", current.green());
+        }
+        ManualPkgVersionLine::Upgrade { current, new } => {
+            print!("{}", "Has an upgrade".red().bold());
+            println!(" ({} vs {})", current.red(), new.green());
+        }
+    }
+}
+
+/// After `sync_manual_repo_remotes`, compare each manual package's PKGBUILD to `pacman -Q`.
+pub fn report_manual_update_versions(config: &Config, cli: &Cli) {
+    blog!("PKGBUILD vs installed (manual_update_packages):");
+    let mut pkgbuild_cache = PkgbuildDirCache::new();
+    for pkg in &config.manual_update_packages {
+        match classify_manual_pkg_version(pkg, cli, config, &mut pkgbuild_cache) {
+            Ok(line) => print_manual_version_line(pkg, line),
+            Err(e) => {
+                ewarn!("{}: {}", pkg, e);
+            }
+        }
+    }
+}
+
+pub fn should_run_manual_prebuild(
+    pkg: &str,
+    cli: &Cli,
+    config: &Config,
+    helpers_match: bool,
+) -> bool {
+    if cli.force_build {
+        return true;
+    }
+    let (repo_name, _, _) = resolve_pkg_repo(pkg, cli, config);
+    if repo_name == "arch" {
+        return helpers_match;
+    }
+    if cli.force_repo_update {
+        match manual_src_newer_than_installed(pkg, cli, config) {
+            Ok(v) => v,
+            Err(e) => {
+                ewarn!(
+                    "{}: could not compare PKGBUILD to installed ({}); using helper list only",
+                    pkg,
+                    e
+                );
+                helpers_match
+            }
+        }
+    } else {
+        helpers_match
+    }
+}
+
+/// Install prompts and `pacman -U` for `pkg`, using `makepkg --packagelist` from the prepared repo.
+/// Used after [`process_package`] when **`compile_first_install_after`** deferred the install pass.
+pub fn install_package_phase(pkg: &str, cli: &Cli, config: &Config) {
+    if cli.compile_only || cli.install_only || cli.download_only {
+        return;
+    }
+
+    let pkg_config = config.packages.get(pkg);
+    let (repo_name, repo_url_string, base_pkg) = resolve_pkg_repo(pkg, cli, config);
+    let repo_dir_path = prepare_repo(
+        pkg,
+        base_pkg.as_str(),
+        &repo_name,
+        repo_url_string.as_str(),
+        &config.paths.packages_path,
+        false,
+        false,
+        None,
+    );
+    let repo_dir = repo_dir_path.as_path();
+
+    crate::install::install_artifacts(
+        pkg,
+        base_pkg.as_str(),
+        Some(repo_dir),
+        config,
+        cli.verbose,
+    );
+
+    if let Some(pc) = pkg_config
+        && let Some(cmd) = &pc.post_update_command
+    {
+        blog!("Running post-update command...");
+        if let Err(e) = run_command("sh", &["-c", cmd], Some(repo_dir)) {
+            ewarn!("Post-update command failed: {}", e);
+        }
+    }
+}
+
+/// `defer_install`: when true (compile-first mode), build only; caller runs [`install_package_phase`] later.
+///
+/// Returns **`false`** if the build failed and **`ignore_compilation_failures`** is set (caller continues).
+pub fn process_package(pkg: &str, cli: &Cli, config: &Config, defer_install: bool) -> bool {
+    let pkg_config = config.packages.get(pkg);
+    let (repo_name, repo_url_string, base_pkg) = resolve_pkg_repo(pkg, cli, config);
+    let repo_url = repo_url_string.as_str();
+    let base_pkg_name = base_pkg.as_str();
 
     if cli.install_only {
         blog!("Install-only mode, searching for existing artifacts...");
         crate::install::install_from_ready_dir(pkg, base_pkg_name, config, cli.verbose);
         return true;
     }
+
+    let install_deferred_this_run = defer_install && !cli.compile_only;
 
     if cli.download_only {
         blog!("Downloading sources for {}...", pkg);
@@ -140,6 +366,7 @@ pub fn process_package(pkg: &str, cli: &Cli, config: &Config) -> bool {
             &config.paths.packages_path,
             cli.clean,
             true,
+            None,
         );
         return true;
     }
@@ -153,6 +380,7 @@ pub fn process_package(pkg: &str, cli: &Cli, config: &Config) -> bool {
         &config.paths.packages_path,
         cli.clean,
         cli.force_repo_update,
+        None,
     );
     let repo_dir = repo_dir_path.as_path();
 
@@ -164,6 +392,13 @@ pub fn process_package(pkg: &str, cli: &Cli, config: &Config) -> bool {
     // overwrite it — keep the upstream baseline for bump logic.
     backup_pkgbuild(repo_dir);
     let _guard = PkgbuildGuard { repo_dir };
+
+    if cli.clean_install || config.build.clean_install_by_default {
+        blog!("Clean install: removing src/ and pkg/...");
+        if let Err(e) = remove_src_pkg_workdirs(repo_dir) {
+            die!("Failed to remove src/ or pkg/: {}", e);
+        }
+    }
 
     if let Some(pc) = pkg_config
         && let Some(cmd) = &pc.pre_update_command
@@ -212,6 +447,11 @@ pub fn process_package(pkg: &str, cli: &Cli, config: &Config) -> bool {
     if let Some(cmd) = custom_cmd {
         blog!("Executing custom build command...");
         if let Err(e) = run_build_with_key_retry(&cmd, repo_dir, cli.verbose) {
+            if config.build.ignore_compilation_failures {
+                ewarn!("Custom build command failed for {}: {}", pkg, e);
+                restore_pkgbuild(repo_dir);
+                return false;
+            }
             die!("Custom build command failed: {}", e);
         }
     } else {
@@ -239,6 +479,11 @@ pub fn process_package(pkg: &str, cli: &Cli, config: &Config) -> bool {
             }
 
             if let Err(e) = run_build_with_key_retry(&build_cmd, repo_dir, cli.verbose) {
+                if config.build.ignore_compilation_failures {
+                    ewarn!("makepkg failed for {}: {}", pkg, e);
+                    restore_pkgbuild(repo_dir);
+                    return false;
+                }
                 die!("makepkg failed for {}: {}", pkg, e);
             }
         } else {
@@ -254,13 +499,18 @@ pub fn process_package(pkg: &str, cli: &Cli, config: &Config) -> bool {
                 build_cmd.push_str(" -- --nocheck");
             }
             if let Err(e) = run_build_with_key_retry(&build_cmd, repo_dir, cli.verbose) {
+                if config.build.ignore_compilation_failures {
+                    ewarn!("makechrootpkg failed for {}: {}", pkg, e);
+                    restore_pkgbuild(repo_dir);
+                    return false;
+                }
                 die!("makechrootpkg failed for {}: {}", pkg, e);
             }
         }
     }
 
-    // Bash: install then post-update (both only if not `-o`). Hooks still see the bumped PKGBUILD.
-    if !cli.compile_only {
+    // Bash: install then post-update (both only if not `-o` and not deferred). Hooks still see the bumped PKGBUILD.
+    if !cli.compile_only && !install_deferred_this_run {
         crate::install::install_artifacts(pkg, base_pkg_name, Some(repo_dir), config, cli.verbose);
 
         if let Some(pc) = pkg_config

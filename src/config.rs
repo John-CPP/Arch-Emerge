@@ -26,12 +26,26 @@ pub struct PathsConfig {
 #[derive(Debug, Deserialize)]
 pub struct BuildConfig {
     pub default_environment: String,
+    /// Continue with the next package when a build fails instead of exiting.
+    #[serde(default, alias = "IGNORE_COMPILATION_FAILURES")]
+    pub ignore_compilation_failures: bool,
+    /// Build every scheduled package first, then run install prompts (so long unattended compile runs finish before any questions).
+    #[serde(default, alias = "COMPILE_FIRST_INSTALL_AFTER")]
+    pub compile_first_install_after: bool,
+    /// Before **`makepkg`**, remove **`src/`** and **`pkg/`** in the package directory. **`--clean-install`** enables the same for that invocation even when this is false.
+    #[serde(default)]
+    pub clean_install_by_default: bool,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SystemUpdateConfig {
-    pub command: String,
-    pub command_with_refresh: String,
+    /// Shown with **`-R`** / **`-U`** (no full refresh). TOML key: `command_to_update_repositories`
+    /// (alias: `command`).
+    #[serde(alias = "command")]
+    pub command_to_update_repositories: String,
+    /// Shown with **`-RU`**. TOML key: `command_to_perform_system_update` (alias: `command_with_refresh`).
+    #[serde(alias = "command_with_refresh")]
+    pub command_to_perform_system_update: String,
     pub ignore_flag: String,
     pub ignore_packages: Vec<String>,
 }
@@ -119,12 +133,27 @@ impl Config {
 
         println!("\n{}", "Build".green().bold());
         println!("  default_environment: {}", self.build.default_environment);
+        println!(
+            "  ignore_compilation_failures: {}",
+            self.build.ignore_compilation_failures
+        );
+        println!(
+            "  compile_first_install_after: {}",
+            self.build.compile_first_install_after
+        );
+        println!(
+            "  clean_install_by_default: {}",
+            self.build.clean_install_by_default
+        );
 
         println!("\n{}", "System Update".green().bold());
-        println!("  command: {}", self.system_update.command);
         println!(
-            "  command_with_refresh: {}",
-            self.system_update.command_with_refresh
+            "  command_to_update_repositories: {}",
+            self.system_update.command_to_update_repositories
+        );
+        println!(
+            "  command_to_perform_system_update: {}",
+            self.system_update.command_to_perform_system_update
         );
         println!("  ignore_flag: {}", self.system_update.ignore_flag);
         if self.system_update.ignore_packages.is_empty() {

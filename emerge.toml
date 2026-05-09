@@ -1,6 +1,12 @@
 # arch-emerge — local paths (edit [paths] for your machine).
 
-manual_update_packages = ["systemd", "qemu-full", "mesa", "lib32-mesa"]
+manual_update_packages = [
+    "systemd",
+    "qemu-full",
+    "mesa",
+    "lib32-mesa",
+    "firefox-pure",
+]
 skip_install_packages = [
     "systemd-tests",
     "qemu-user-static-binfmt",
@@ -15,12 +21,15 @@ ready_made_packages_path = "/media/storage/packages/emerge_ready"
 
 [build]
 default_environment = "local"
+ignore_compilation_failures = false
+compile_first_install_after = false
+clean_install_by_default = false
 
 [system_update]
-command = "yay -Su"
-command_with_refresh = "yay -Syu"
+command_to_update_repositories = "yay -Sy"
+command_to_perform_system_update = "yay -Syu"
 ignore_flag = "--ignore"
-ignore_packages = ["firefox", "firefox-pure"]
+ignore_packages = []
 
 [repositories]
 arch = "https://gitlab.archlinux.org/archlinux/packaging/packages"
@@ -46,6 +55,8 @@ alias = "qemu"
 source = "ventureoo"
 build_env = "local"
 tests = true
+# Mozilla PKGBUILDs: leftover `mozbuild/` makes `prepare()` fail with "File exists".
+pre_update_command = "rm -rf mozbuild"
 
 [packages.vim]
 source = "arch"
@@ -56,8 +67,10 @@ tests = false
 source = "cachyos"
 build_env = "local"
 tests = true
+custom_local_build_command = "export CC=clang; export CXX=clang++; makepkg --syncdeps --noconfirm --needed -f"
 
 [packages.lib32-mesa]
 source = "cachyos"
 build_env = "local"
 tests = true
+custom_local_build_command = "export CC=clang; export CXX=clang++; makepkg --syncdeps --noconfirm --needed -f"

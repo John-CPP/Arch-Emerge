@@ -2,12 +2,9 @@
 # /etc/arch-emerge/emerge.toml, or ./emerge.toml and set [paths] for your system.
 # Demo paths use /tmp/arch-emerge-demo/...
 
-manual_update_packages = ["systemd", "qemu-full", "mesa", "lib32-mesa"]
+manual_update_packages = [
+]
 skip_install_packages = [
-    "systemd-tests",
-    "qemu-user-static-binfmt",
-    "qemu-user-static",
-    "qemu-guest-agent",
 ]
 
 [paths]
@@ -17,49 +14,26 @@ ready_made_packages_path = "/tmp/arch-emerge-demo/emerge_ready"
 
 [build]
 default_environment = "local"
+ignore_compilation_failures = false
+compile_first_install_after = false
+clean_install_by_default = false
 
 [system_update]
-command = "yay -Su"
-command_with_refresh = "yay -Syu"
+command_to_update_repositories = "pacman -Su"
+command_to_perform_system_update = "pacman -Syu"
 ignore_flag = "--ignore"
-ignore_packages = ["firefox", "firefox-pure"]
+ignore_packages = []
 
 [repositories]
 arch = "https://gitlab.archlinux.org/archlinux/packaging/packages"
 cachyos = "https://github.com/CachyOS/CachyOS-PKGBUILDS.git"
-ventureoo = "https://github.com/ventureoo/PKGBUILDs.git"
-venomo = "https://github.com/Ven0m0/PKG.git"
 default = "arch"
 
 [packages]
 
-[packages.systemd]
-source = "arch"
-build_env = "local"
-tests = false
-
-[packages.qemu-full]
-source = "arch"
-build_env = "local"
-tests = true
-alias = "qemu"
-
-[packages.firefox-pure]
-source = "ventureoo"
-build_env = "local"
-tests = true
-
-[packages.vim]
-source = "arch"
-build_env = "local"
-tests = false
-
-[packages.mesa]
-source = "cachyos"
-build_env = "local"
-tests = true
-
-[packages.lib32-mesa]
-source = "cachyos"
-build_env = "local"
-tests = true
+# Example: Firefox-like PKGBUILDs need a clean `mozbuild/` before each build.
+# [packages.firefox-pure]
+# source = "ventureoo"
+# build_env = "local"
+# tests = true
+# pre_update_command = "rm -rf mozbuild"

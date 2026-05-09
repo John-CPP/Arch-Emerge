@@ -1,9 +1,14 @@
 use crate::utils::{check_sudo_removal, run_command};
 use crate::{blog, die, ewarn};
 use colored::Colorize;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+/// Caches `collect_pkgbuild_dirs` per shared repo root so scanning a large tree (e.g. CachyOS)
+/// happens once per `report_manual_update_versions` pass, not once per package.
+pub type PkgbuildDirCache = HashMap<PathBuf, Vec<PathBuf>>;
 
 fn collect_pkgbuild_dirs(root: &Path, out: &mut Vec<PathBuf>) {
     let entries = match fs::read_dir(root) {
@@ -30,10 +35,13 @@ fn collect_pkgbuild_dirs(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn find_pkg_dir(repo_dir: &Path, pkg_name: &str) -> Option<PathBuf> {
+fn list_pkgbuild_parent_dirs(repo_root: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    collect_pkgbuild_dirs(repo_dir, &mut dirs);
+    collect_pkgbuild_dirs(repo_root, &mut dirs);
+    dirs
+}
 
+fn find_pkg_dir_in_list(dirs: &[PathBuf], pkg_name: &str) -> Option<PathBuf> {
     if let Some(exact) = dirs.iter().find(|d| {
         d.file_name()
             .and_then(|n| n.to_str())
@@ -44,14 +52,34 @@ fn find_pkg_dir(repo_dir: &Path, pkg_name: &str) -> Option<PathBuf> {
     }
 
     let pkg_name_lower = pkg_name.to_lowercase();
-    dirs.into_iter().find(|d| {
-        d.file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.to_lowercase().contains(&pkg_name_lower))
-            .unwrap_or(false)
-    })
+    dirs.iter()
+        .find(|d| {
+            d.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.to_lowercase().contains(&pkg_name_lower))
+                .unwrap_or(false)
+        })
+        .cloned()
 }
 
+fn find_pkg_dir(repo_dir: &Path, pkg_name: &str) -> Option<PathBuf> {
+    let dirs = list_pkgbuild_parent_dirs(repo_dir);
+    find_pkg_dir_in_list(&dirs, pkg_name)
+}
+
+pub fn find_pkg_dir_cached(
+    repo_dir: &Path,
+    pkg_name: &str,
+    cache: &mut PkgbuildDirCache,
+) -> Option<PathBuf> {
+    if !cache.contains_key(repo_dir) {
+        cache.insert(repo_dir.to_path_buf(), list_pkgbuild_parent_dirs(repo_dir));
+    }
+    let dirs = cache.get(repo_dir).unwrap();
+    find_pkg_dir_in_list(dirs, pkg_name)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_repo(
     pkg_name: &str,
     base_pkg_name: &str,
@@ -60,6 +88,7 @@ pub fn prepare_repo(
     packages_path: &str,
     clean: bool,
     force_update: bool,
+    pkgbuild_cache: Option<&mut PkgbuildDirCache>,
 ) -> PathBuf {
     if repo_name == "arch" {
         let repo_dir = PathBuf::from(packages_path)
@@ -81,6 +110,11 @@ pub fn prepare_repo(
                 None::<&str>,
             ) {
                 die!("Failed to clone repository {}: {}", clone_url, e);
+            }
+        } else if force_update && repo_dir.join(".git").exists() {
+            blog!("Updating arch package repo {}...", base_pkg_name);
+            if let Err(e) = run_command("git", &["pull", "--ff-only"], Some(&repo_dir)) {
+                ewarn!("git pull failed for {}: {}", base_pkg_name, e);
             }
         }
         return repo_dir;
@@ -154,7 +188,11 @@ pub fn prepare_repo(
         }
     }
 
-    match find_pkg_dir(&repo_dir, base_pkg_name) {
+    let found = match pkgbuild_cache {
+        Some(cache) => find_pkg_dir_cached(&repo_dir, base_pkg_name, cache),
+        None => find_pkg_dir(&repo_dir, base_pkg_name),
+    };
+    match found {
         Some(path) => path,
         None => die!("Package {} not found in repository {}", pkg_name, repo_name),
     }

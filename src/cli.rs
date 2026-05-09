@@ -62,7 +62,10 @@ pub struct Cli {
     #[arg(short = 'i', action = ArgAction::SetTrue)]
     pub silent: bool,
 
-    /// Force git pull / repository refresh for all custom repositories
+    /// Refresh git clones for `manual_update_packages` (arch: per package; others: once per repo).
+    /// With `-U` (`-RU`): refresh, version report, compile what qualifies, then
+    /// `command_to_perform_system_update`. Without `-U` (`-R` alone): refresh, report, then
+    /// `command_to_update_repositories` (no compile).
     #[arg(short = 'R', action = ArgAction::SetTrue)]
     pub force_repo_update: bool,
 
@@ -77,6 +80,10 @@ pub struct Cli {
     /// Only install already built artifacts from READY_MADE_PACKAGES_PATH
     #[arg(long, action = ArgAction::SetTrue)]
     pub install_only: bool,
+
+    /// Before compilation, remove `src/` and `pkg/` under the package directory (overrides config when enabling clean install)
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub clean_install: bool,
 
     /// Print commands without executing them
     #[arg(long, action = ArgAction::SetTrue)]
